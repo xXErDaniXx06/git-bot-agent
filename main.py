@@ -1,70 +1,107 @@
-import asyncio
 import os
-import shutil
+import subprocess
 from dotenv import load_dotenv
 from anthropic import Anthropic
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
 
-# Cargamos credenciales
 load_dotenv()
 client = Anthropic()
 
-async def iniciar_agente_web():
-    print("🚀 Arrancando el Servidor MCP de Puppeteer...")
-    
-    # Buscamos npx de forma segura en Windows
-    ruta_npx = shutil.which("npx")
-    if not ruta_npx:
-        print("❌ Error: No se pudo encontrar npx en tu sistema.")
-        return
-
-    # Parámetros limpios y exactos
-    server_params = StdioServerParameters(
-        command=ruta_npx,
-        args=["-y", "@modelcontextprotocol/server-puppeteer"],
-        env=os.environ.copy()
-    )
-
+def leer_contexto():
     try:
-        async with stdio_client(server_params) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                print("✅ ¡Conectado al servidor MCP con éxito!")
+        with open("agents.md", "r", encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        return "Eres un asistente de desarrollo."
 
-                herramientas_mcp = await session.list_tools()
-                nombres_herramientas = [t.name for t in herramientas_mcp.tools]
-                print(f"🛠️  Herramientas web disponibles: {nombres_herramientas}\n")
+# --- LAS HERRAMIENTAS REALES (Manos del agente) ---
+def ejecutar_git_status():
+    return subprocess.run(['git', 'status'], capture_output=True, text=True).stdout
 
-                tools_para_claude = [
-                    {"name": t.name, "description": t.description, "input_schema": t.inputSchema}
-                    for t in herramientas_mcp.tools
-                ]
+def ejecutar_git_diff():
+    # Añadimos HEAD para leer todo, preparado o no
+    return subprocess.run(['git', 'diff', 'HEAD'], capture_output=True, text=True, encoding='utf-8').stdout
 
-                print("🧠 Pidiendo a Claude que navegue por internet...")
-                respuesta = client.messages.create(
-                    model="claude-sonnet-4-6",
-                    max_tokens=500,
-                    tools=tools_para_claude,
-                    messages=[
-                        {"role": "user", "content": "Navega a la web 'https://example.com' y dime exactamente qué texto aparece en el título principal de la página."}
-                    ]
-                )
+def ejecutar_commit_real(mensaje):
+    # 1. Prepara todos los archivos
+    subprocess.run(['git', 'add', '.'])
+    # 2. Ejecuta el commit con el mensaje que ha pensado la IA
+    resultado = subprocess.run(['git', 'commit', '-m', mensaje], capture_output=True, text=True)
+    return resultado.stdout
 
-                if respuesta.stop_reason == "tool_use":
-                    tool_call = next(block for block in respuesta.content if block.type == "tool_use")
-                    print(f"🤖 Claude ejecutando: {tool_call.name} con parámetros: {tool_call.input}\n")
-                    
-                    # Llamamos a la herramienta en el servidor
-                    resultado = await session.call_tool(tool_call.name, tool_call.input)
-                    print("=== LO QUE VIO EL NAVEGADOR ===")
-                    print(resultado.content[0].text)
-                else:
-                    print("Respuesta de Claude sin usar herramientas:")
-                    print(respuesta.content[0].text)
-                    
-    except Exception as e:
-        print(f"💥 Error al conectar: {e}")
+# --- DEFINICIÓN DE HERRAMIENTAS PARA CLAUDE ---
+mis_herramientas = [
+    {
+        "name": "ver_estado",
+        "description": "Usa esto primero para ver qué archivos han cambiado.",
+        "input_schema": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "ver_codigo",
+        "description": "Usa esto para leer las líneas exactas de código que el usuario ha modificado.",
+        "input_schema": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "hacer_commit",
+        "description": "Usa esto para ejecutar el commit final. Automáticamente hace 'git add .' antes del commit.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "mensaje": {
+                    "type": "string",
+                    "description": "El mensaje exacto del commit siguiendo las reglas de Conventional Commits en inglés."
+                }
+            },
+            "required": ["mensaje"]
+        }
+    }
+]
+
+def iniciar_agente_git():
+    print("🚀 Iniciando tu Asistente Git Personal...\n")
+    reglas = leer_contexto()
+    
+    # Empezamos dándole la orden inicial
+    mensajes = [
+        {"role": "user", "content": "Analiza mi repositorio local y haz un commit con los cambios pendientes. Si no hay cambios, dímelo."}
+    ]
+
+    pasos = 1
+    # EL BUCLE DEL AGENTE
+    while True:
+        respuesta = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=800,
+            system=reglas,
+            tools=mis_herramientas,
+            messages=mensajes
+        )
+
+        if respuesta.stop_reason == "tool_use":
+            tool_call = next(block for block in respuesta.content if block.type == "tool_use")
+            print(f"🔄 Paso {pasos} - El agente ha decidido usar: {tool_call.name}")
+            
+            # Ejecutamos la herramienta que haya pedido
+            if tool_call.name == "ver_estado":
+                resultado_texto = ejecutar_git_status()
+            elif tool_call.name == "ver_codigo":
+                resultado_texto = ejecutar_git_diff()
+            elif tool_call.name == "hacer_commit":
+                mensaje_generado = tool_call.input["mensaje"]
+                print(f"✍️  Escribiendo commit: {mensaje_generado}")
+                resultado_texto = ejecutar_commit_real(mensaje_generado)
+
+            # Guardamos la memoria para que siga pensando
+            mensajes.append({"role": "assistant", "content": respuesta.content})
+            mensajes.append({
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": tool_call.id, "content": resultado_texto}]
+            })
+            pasos += 1
+            
+        else:
+            print("\n=== TRABAJO TERMINADO ===")
+            print(respuesta.content[0].text)
+            break
 
 if __name__ == "__main__":
-    asyncio.run(iniciar_agente_web())
+    iniciar_agente_git()
