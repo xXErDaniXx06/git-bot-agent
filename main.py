@@ -3,12 +3,18 @@ import subprocess
 from dotenv import load_dotenv
 from anthropic import Anthropic
 
-load_dotenv()
+# 1. Fijamos la "casa" del agente (su ruta absoluta)
+DIRECTORIO_AGENTE = os.path.dirname(os.path.abspath(__file__))
+
+# 2. Cargamos el .env obligándole a mirar en su casa
+load_dotenv(os.path.join(DIRECTORIO_AGENTE, ".env"))
 client = Anthropic()
 
 def leer_contexto():
+    # 3. Obligamos a que lea el agents.md de su casa
+    ruta_agents = os.path.join(DIRECTORIO_AGENTE, "agents.md")
     try:
-        with open("agents.md", "r", encoding="utf-8") as f:
+        with open(ruta_agents, "r", encoding="utf-8") as f:
             return f.read()
     except FileNotFoundError:
         return "Eres un asistente de desarrollo."
@@ -77,24 +83,38 @@ def iniciar_agente_git():
         )
 
         if respuesta.stop_reason == "tool_use":
-            tool_call = next(block for block in respuesta.content if block.type == "tool_use")
-            print(f"🔄 Paso {pasos} - El agente ha decidido usar: {tool_call.name}")
-            
-            # Ejecutamos la herramienta que haya pedido
-            if tool_call.name == "ver_estado":
-                resultado_texto = ejecutar_git_status()
-            elif tool_call.name == "ver_codigo":
-                resultado_texto = ejecutar_git_diff()
-            elif tool_call.name == "hacer_commit":
-                mensaje_generado = tool_call.input["mensaje"]
-                print(f"✍️  Escribiendo commit: {mensaje_generado}")
-                resultado_texto = ejecutar_commit_real(mensaje_generado)
-
-            # Guardamos la memoria para que siga pensando
+            # 1. Guardamos la petición de Claude (que puede contener varias herramientas)
             mensajes.append({"role": "assistant", "content": respuesta.content})
+            
+            # 2. Preparamos una lista para meter todos los resultados
+            resultados_herramientas = []
+
+            # 3. Procesamos TODAS las herramientas que haya pedido a la vez
+            for block in respuesta.content:
+                if block.type == "tool_use":
+                    print(f"🔄 Paso {pasos} - El agente ejecuta: {block.name}")
+                    
+                    resultado_texto = ""
+                    if block.name == "ver_estado":
+                        resultado_texto = ejecutar_git_status()
+                    elif block.name == "ver_codigo":
+                        resultado_texto = ejecutar_git_diff()
+                    elif block.name == "hacer_commit":
+                        mensaje_generado = block.input["mensaje"]
+                        print(f"✍️  Escribiendo commit: {mensaje_generado}")
+                        resultado_texto = ejecutar_commit_real(mensaje_generado)
+
+                    # Metemos el resultado en la lista emparejado con su ID
+                    resultados_herramientas.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": resultado_texto
+                    })
+            
+            # 4. Le mandamos de vuelta el paquete con todos los resultados juntos
             mensajes.append({
                 "role": "user",
-                "content": [{"type": "tool_result", "tool_use_id": tool_call.id, "content": resultado_texto}]
+                "content": resultados_herramientas
             })
             pasos += 1
             
